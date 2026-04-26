@@ -1,0 +1,42 @@
+#config/settings.yaml
+
+# MARKET MAKER BOT V2 - Mid price alapú, aszimmetrikus momentum védelemmel
+
+sandbox: false
+
+trading:
+  symbol: "PEPE/USD"
+  
+  # 🔥 SPREAD BEÁLLÍTÁSOK (mid price alapú)
+  base_half_spread: 0.0035      # 0.35% fél spread → teljes spread 0.7%
+  min_half_spread: 0.00275      # 0.275% minimum (hogy a teljes spread >0.55%)
+  max_half_spread: 0.01         # 1.0% maximum (védelem extrém esetben)
+  
+  # 🔥 MOMENTUM VÉDELEM (teljesülés után)
+  momentum:
+    cooldown_seconds: 5         # Ennyi másodpercig tart a védelem
+    ask_multiplier: 2.5         # ASK teljesülés után: ASK spread x2.5, BID x0.8
+    bid_multiplier: 2.5         # BID teljesülés után: BID spread x2.5, ASK x0.8
+    min_distance_percent: 0.002 # 0.2% minimum távolság az előző kitöltéstől
+  
+  # 🔥 REBALANCE (inventory skew)
+  target_ratio_base: 0.5
+  target_ratio_quote: 0.5
+  
+  # Order méret
+  order_size_percent: 0.10
+  interval_seconds: 5
+  
+  # Díjak
+  maker_fee: 0.0025             # 0.25%
+  
+  # Volatilitás (opcionális, extra védelem)
+  volatility:
+    atr_period: 14
+    atr_extra_multiplier: 0     # 0 = kikapcsolva, később bekapcsolhatod
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+
+telegram_enabled: true
