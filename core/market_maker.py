@@ -231,26 +231,40 @@ class MarketMaker:
         current_base = balances.get(self.base_currency, 0)
         current_quote = balances.get(self.quote_currency, 0)
         total_value = current_quote + (current_base * mid_price)
-        
+
         if total_value > 0:
             current_ratio = (current_base * mid_price) / total_value
             deviation = current_ratio - self.target_ratio_base
         else:
             deviation = 0
-        
-        # 🔥 DINAMIKUS SKEW (JAVÍTOTT)
-        if abs(deviation) > 0.1:
-            skew_strength = min(0.005, abs(deviation) * 0.05)  # max 0.5%
-        else:
-            skew_strength = 0.001  # 0.1%
 
-        if deviation < 0:  # Kevés PEPE (több USD) → VÉTEL
-            final_bid_half = final_bid_half - skew_strength   # BID közelebb (kisebb spread)
-            final_ask_half = final_ask_half + skew_strength   # ASK távolabb (nagyobb spread)
-        else:  # deviation > 0, Több PEPE (kevés USD) → ELADÁS
-            final_bid_half = final_bid_half + skew_strength   # BID távolabb (nagyobb spread)
-            final_ask_half = final_ask_half - skew_strength   # ASK közelebb (kisebb spread)
-        
+        # 🔥 MAXIMÁLIS SKEW SZÁMÍTÁS (arányos az eltéréssel)
+        max_allowed_skew = 0.001  # maximum 0.1% eltolás (NE mehessen a minimum alá!)
+
+        # A rendelkezésre álló tér a minimum spread felett
+        available_skew_space = final_bid_half - self.min_half_spread  # mennyit lehet csökkenteni
+
+        # Skew erőssége arányos az eltéréssel (max 50% eltérésnél legyen max)
+        if abs(deviation) >= 0.5:  # 50% eltérés (25-75% arány)
+            skew_strength = min(max_allowed_skew, available_skew_space)
+        elif abs(deviation) > 0.1:  # 10-50% között arányosan
+            ratio = (abs(deviation) - 0.1) / 0.4  # 0..1 között
+            skew_strength = min(max_allowed_skew * ratio, available_skew_space)
+        else:  # 10% alatt nincs skew
+            skew_strength = 0
+
+        # Skew iránya
+        if deviation < 0:  # Kevés PEPE → VÉTEL
+            final_bid_half = final_bid_half - skew_strength
+            final_ask_half = final_ask_half + skew_strength
+        else:  # Több PEPE → ELADÁS
+            final_bid_half = final_bid_half + skew_strength
+            final_ask_half = final_ask_half - skew_strength
+
+        # 🔥 BIZTONSÁGI ELLENŐRZÉS (soha nem mehetünk a minimum alá!)
+        final_bid_half = max(self.min_half_spread, final_bid_half)
+        final_ask_half = max(self.min_half_spread, final_ask_half)
+                
         # ========== 4. MINIMUM SPREAD BIZTOSÍTÁS ==========
         min_required = self.maker_fee * 1.1  # 0.275%
         
@@ -468,13 +482,13 @@ class MarketMaker:
     
     def ensure_orders(self, mid_price):
         """Biztosítja, hogy mindkét order kint van"""
-        try:
+        try:            
+            # 🔥 TELJESÜLÉSEK ELLENŐRZÉSE (minden ciklusban)
+            self.check_filled_orders()
+
             # Várakozás teljesülés után
             if self.last_filled_time and (time.time() - self.last_filled_time) < self.cooldown_seconds:
                 return
-            
-            # 🔥 TELJESÜLÉSEK ELLENŐRZÉSE (minden ciklusban)
-            self.check_filled_orders()
 
             bid_price, ask_price, current_spread = self.calculate_bid_ask()
             if bid_price is None or ask_price is None:
