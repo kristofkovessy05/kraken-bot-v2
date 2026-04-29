@@ -10,10 +10,14 @@ class PnLCalculator:
     def __init__(self, base_currency, quote_currency):
         self.base_currency = base_currency
         self.quote_currency = quote_currency
-        self.inventory = []  # FIFO készlet
+        self.inventory = []
         self.total_profit = 0.0
         self.bid_filled = 0
         self.ask_filled = 0
+        
+        # 🔥 ÚJ: balance nyomon követés
+        self.pepe_balance = 0.0
+        self.usd_balance = 0.0
     
     def init_inventory(self, initial_base, current_price):
         """Kezdeti inventory beállítása (meglévő pozíció)"""
@@ -25,18 +29,26 @@ class PnLCalculator:
                 'fee': 0,
                 'cost': initial_cost
             }]
+            # 🔥 BALANCE FRISSÍTÉS
+            self.pepe_balance = initial_base
+            self.usd_balance = 0.0  # Kezdetben nincs USD befektetve (vagy a kezdeti egyenleg?)
             print(f"  🔍 Kezdeti inventory: {initial_base} {self.base_currency} @ ${current_price:.9f}")
     
     def add_buy(self, amount, price, fee, trade_ids):
         """BID teljesülés - hozzáadás a FIFO készlethez"""
         self.bid_filled += 1
+        cost = amount * price + fee
         self.inventory.append({
             'amount': amount,
             'price': price,
             'fee': fee,
-            'cost': (amount * price) + fee,
-            'trade_ids': trade_ids
+            'cost': cost
         })
+        
+        # 🔥 BALANCE FRISSÍTÉS (vásárlás: USD csökken, PEPE nő)
+        self.usd_balance -= cost
+        self.pepe_balance += amount
+        
         return {
             'side': 'BUY',
             'amount': amount,
@@ -51,7 +63,6 @@ class PnLCalculator:
         
         remaining = amount
         trade_profit = 0.0
-        used_inventory = []
         
         while remaining > 0 and self.inventory:
             oldest = self.inventory[0]
@@ -59,7 +70,6 @@ class PnLCalculator:
             
             buy_cost = oldest['cost'] * (sell_amount / oldest['amount'])
             sell_revenue = (sell_amount * price) - (fee * (sell_amount / amount))
-            
             trade_profit += sell_revenue - buy_cost
             
             oldest['amount'] -= sell_amount
@@ -71,6 +81,11 @@ class PnLCalculator:
             remaining -= sell_amount
         
         self.total_profit += trade_profit
+        
+        # 🔥 BALANCE FRISSÍTÉS (eladás: USD nő, PEPE csökken)
+        revenue = amount * price - fee
+        self.usd_balance += revenue
+        self.pepe_balance -= amount
         
         return {
             'side': 'SELL',

@@ -163,22 +163,16 @@ class MarketMaker:
         print(f"⚖️ Rebalance max skew: {self.max_skew*100:.2f}%")
         print(f"💰 Maker díj: {self.maker_fee*100:.2f}%")
         
-    # ========== 🔥 BID/ASK SZÁMÍTÁS (LAST BID/ASK ALAPJÁN) ==========
+    # ========== 🔥 BID/ASK SZÁMÍTÁS (MID PRICE ALAPJÁN) ==========
     
     def calculate_bid_ask(self):
         """
-        Mid price alapú, aszimmetrikus momentum védelemmel.
-        
-        Normál eset: bid = mid * (1 - half_spread), ask = mid * (1 + half_spread)
-        
-        ASK teljesülés után (ár emelkedik):
-            - ASK spread megnő (távolabb rakjuk)
-            - BID spread csökken (közelebb rakjuk, hogy elkapjuk a visszakorrekciót)
-        
-        BID teljesülés után (ár csökken):
-            - BID spread megnő (távolabb rakjuk)
-            - ASK spread csökken (közelebb rakjuk)
+        Mid price alapú árazás (V1 stratégia, javított momentum védelemmel)
+
+        BID = mid * (1 - half_spread)
+        ASK = mid * (1 + half_spread)
         """
+
         best_bid = self.api.get_best_bid(self.symbol)
         best_ask = self.api.get_best_ask(self.symbol)
         
@@ -187,7 +181,7 @@ class MarketMaker:
         
         mid_price = (best_bid + best_ask) / 2
         
-        # ========== 1. MOMENTUM MULTIPLIER SZÁMÍTÁS ==========
+        # ========== 1. MOMENTUM VÉDELEM (JAVÍTOTT) ==========
         bid_multiplier = 1.0
         ask_multiplier = 1.0
         
@@ -195,124 +189,81 @@ class MarketMaker:
             time_since_fill = time.time() - self.last_filled_time
             
             if time_since_fill < self.cooldown_seconds:
-                # Lineáris interpoláció a fokozatos visszaálláshoz
-                progress = time_since_fill / self.cooldown_seconds  # 0..1
+                progress = time_since_fill / self.cooldown_seconds
                 
-                # A calculate_bid_ask-ben módosítsd:
-                if self.last_filled_side == 'sell':  # ASK teljesült
-                    # Régi (túl agresszív):
-                    # bid_multiplier = (1.0 / self.ask_multiplier) + ...
-                    
-                    # ÚJ (kiegyensúlyozott):
-                    ask_multiplier = self.ask_multiplier - ((self.ask_multiplier - 1.0) * progress)
-                    # BID: csak enyhe közelítés (0.9, nem 0.4)
-                    bid_multiplier = max(0.9, 1.0 - (0.1 * (1 - progress)))  # 0.9 → 1.0
-
-                    if progress < 0.1:
-                        print(f"  🔥 MOMENTUM: ASK után | ask_mult={ask_multiplier:.2f}, bid_mult={bid_multiplier:.2f}")
-                    
-                elif self.last_filled_side == 'buy':  # BID teljesült
-                    bid_multiplier = self.bid_multiplier - ((self.bid_multiplier - 1.0) * progress)
-                    ask_multiplier = max(0.9, 1.0 - (0.1 * (1 - progress)))  # 0.9 → 1.0
+                if self.last_filled_side == 'sell':  # ASK teljesült (eladás, kevesebb PEPE)
+                    # BID közelebb (visszavétel), ASK távolabb (ne adj tovább)
+                    bid_multiplier = 0.5 + (0.5 * progress)   # 0.5 → 1.0
+                    ask_multiplier = 1.5 + (0.5 * progress)   # 1.5 → 2.0
                     
                     if progress < 0.1:
-                        print(f"  🔥 MOMENTUM: BID után | bid_mult={bid_multiplier:.2f}, ask_mult={ask_multiplier:.2f}")
+                        print(f"  🔥 MOMENTUM: ASK után | bid_mult={bid_multiplier:.2f}, ask_mult={ask_multiplier:.2f}")
+                        
+                elif self.last_filled_side == 'buy':  # BID teljesült (vétel, több PEPE)
+                    # ASK közelebb (eladás), BID távolabb (ne vegyél többet)
+                    ask_multiplier = 0.5 + (0.5 * progress)   # 0.5 → 1.0
+                    bid_multiplier = 1.5 + (0.5 * progress)   # 1.5 → 2.0
+                    
+                    if progress < 0.1:
+                        print(f"  🔥 MOMENTUM: BID után | ask_mult={ask_multiplier:.2f}, bid_mult={bid_multiplier:.2f}")
         
         # ========== 2. BASE SPREAD ==========
-        base_bid_half = self.base_half_spread
-        base_ask_half = self.base_half_spread
+        base_half_spread = self.base_half_spread
         
         # Momentum alkalmazása
-        final_bid_half = base_bid_half * bid_multiplier
-        final_ask_half = base_ask_half * ask_multiplier
+        final_bid_half = base_half_spread * bid_multiplier
+        final_ask_half = base_half_spread * ask_multiplier
         
         # ========== 3. SKEW (inventory alapján) ==========
         balances = self.position_manager.get_current_balances()
         current_base = balances.get(self.base_currency, 0)
         current_quote = balances.get(self.quote_currency, 0)
         total_value = current_quote + (current_base * mid_price)
-
+        
         if total_value > 0:
-            current_ratio = (current_base * mid_price) / total_value
-            deviation = current_ratio - self.target_ratio_base
+            base_ratio = (current_base * mid_price) / total_value
+            deviation = base_ratio - self.target_ratio_base
         else:
             deviation = 0
-
-        # 🔥 MAXIMÁLIS SKEW SZÁMÍTÁS (arányos az eltéréssel)
-        max_allowed_skew = 0.001  # maximum 0.1% eltolás (NE mehessen a minimum alá!)
-
-        # A rendelkezésre álló tér a minimum spread felett
-        available_skew_space = final_bid_half - self.min_half_spread  # mennyit lehet csökkenteni
-
-        # Skew erőssége arányos az eltéréssel (max 50% eltérésnél legyen max)
-        if abs(deviation) >= 0.5:  # 50% eltérés (25-75% arány)
-            skew_strength = min(max_allowed_skew, available_skew_space)
-        elif abs(deviation) > 0.1:  # 10-50% között arányosan
-            ratio = (abs(deviation) - 0.1) / 0.4  # 0..1 között
-            skew_strength = min(max_allowed_skew * ratio, available_skew_space)
-        else:  # 10% alatt nincs skew
-            skew_strength = 0
-
-        # Skew iránya
-        if deviation < 0:  # Kevés PEPE → VÉTEL
-            final_bid_half = final_bid_half - skew_strength
-            final_ask_half = final_ask_half + skew_strength
-        else:  # Több PEPE → ELADÁS
-            final_bid_half = final_bid_half + skew_strength
-            final_ask_half = final_ask_half - skew_strength
-
-        # 🔥 BIZTONSÁGI ELLENŐRZÉS (soha nem mehetünk a minimum alá!)
-        final_bid_half = max(self.min_half_spread, final_bid_half)
-        final_ask_half = max(self.min_half_spread, final_ask_half)
-                
+        
+        # 🔥 SKEW: ha eltérés van, az egyik oldalt távolabb, a másikat közelebb
+        max_skew = 0.001  # maximum 0.1% eltolás
+        
+        if abs(deviation) >= 0.5:
+            skew_strength = max_skew
+        else:
+            skew_strength = max_skew * (abs(deviation) / 0.5)
+        
+        # 🔥 JAVÍTÁS: skew iránya (mindig a trend ellen)
+        if deviation > 0:  # Több PEPE → ELADÁS
+            final_bid_half = final_bid_half + skew_strength  # BID távolabb
+            final_ask_half = final_ask_half - skew_strength  # ASK közelebb
+        else:  # Kevés PEPE → VÉTEL
+            final_bid_half = final_bid_half - skew_strength  # BID közelebb
+            final_ask_half = final_ask_half + skew_strength  # ASK távolabb
+        
         # ========== 4. MINIMUM SPREAD BIZTOSÍTÁS ==========
         min_required = self.maker_fee * 1.1  # 0.275%
-        
         final_bid_half = max(min_required, min(self.max_half_spread, final_bid_half))
         final_ask_half = max(min_required, min(self.max_half_spread, final_ask_half))
         
-        # ========== 5. ÁRAK SZÁMÍTÁSA ==========
+        # ========== 5. ÁRAK SZÁMÍTÁSA (mid alapján) ==========
         raw_bid = mid_price * (1 - final_bid_half)
         raw_ask = mid_price * (1 + final_ask_half)
         
-        # ========== 6. TÁVOLSÁGVÉDELEM (előző kitöltéstől) ==========
-        if self.last_filled_price and self.last_filled_time:
-            time_since_fill = time.time() - self.last_filled_time
-            
-            if time_since_fill < self.cooldown_seconds:
-                if self.last_filled_side == 'sell':  # ASK volt
-                    min_ask = self.last_filled_price * (1 + self.min_distance_percent)
-                    if raw_ask < min_ask:
-                        raw_ask = min_ask
-                        print(f"  🔥 TÁVOLSÁGVÉDELEM: ASK {raw_ask:.8f} -> {min_ask:.8f}")
-                
-                elif self.last_filled_side == 'buy':  # BID volt
-                    max_bid = self.last_filled_price * (1 - self.min_distance_percent)
-                    if raw_bid > max_bid:
-                        raw_bid = max_bid
-                        print(f"  🔥 TÁVOLSÁGVÉDELEM: BID {raw_bid:.8f} -> {max_bid:.8f}")
-        
-        # ========== 7. VOLATILITÁS (opcionális extra) ==========
-        if self.atr_extra_multiplier > 0:
-            volatility_extra = self._calculate_volatility_extra(mid_price)
-            if volatility_extra > 0:
-                raw_bid = raw_bid * (1 - volatility_extra / 2)
-                raw_ask = raw_ask * (1 + volatility_extra / 2)
-        
-        # ========== 8. TICK SIZE KEREKÍTÉS ==========
+        # ========== 6. TICK SIZE KEREKÍTÉS ==========
         bid_price = round(math.floor(raw_bid / self.tick_size) * self.tick_size, self.decimals)
         ask_price = round(math.ceil(raw_ask / self.tick_size) * self.tick_size, self.decimals)
         
         # Érvényesség ellenőrzés
         if bid_price >= ask_price:
-            # Ha valamiért keresztbe menne, kicsit széthúzzuk
             bid_price = round(bid_price - self.tick_size, self.decimals)
             ask_price = round(ask_price + self.tick_size, self.decimals)
         
         current_spread = (ask_price - bid_price) / mid_price if mid_price > 0 else 0
         
         return bid_price, ask_price, current_spread
-    
+
     def _calculate_volatility_extra(self, mid_price):
         """ATR alapú extra spread (opcionális, később bekapcsolható)"""
         if self.atr_extra_multiplier <= 0:
@@ -434,6 +385,12 @@ class MarketMaker:
                     result = self.pnl_calculator.add_sell(amount, price, fee, trade_ids)
                     self._print_sell_result(result)
                     self.pnl_calculator.log_trade('SELL', amount, price, fee, trade_ids, result['profit'])
+
+                    # 🔥 AZONNALI BALANCE FRISSÍTÉS (eladás után)
+                    self.position_manager.update_balances_direct(
+                        self.pnl_calculator.pepe_balance,
+                        self.pnl_calculator.usd_balance
+                    )
                     
                     if self.notifier:
                         self.notifier.send_message(
@@ -447,6 +404,12 @@ class MarketMaker:
                     result = self.pnl_calculator.add_buy(amount, price, fee, trade_ids)
                     self._print_buy_result(result)
                     self.pnl_calculator.log_trade('BUY', amount, price, fee, trade_ids)
+
+                    # 🔥 AZONNALI BALANCE FRISSÍTÉS (vásárlás után)
+                    self.position_manager.update_balances_direct(
+                        self.pnl_calculator.pepe_balance,
+                        self.pnl_calculator.usd_balance
+                    )
                     
                     if self.notifier:
                         self.notifier.send_message(
@@ -603,10 +566,18 @@ class MarketMaker:
         minutes = (runtime % 3600) // 60
         seconds = runtime % 60
         
+        # 🔥 A TÉNYLEGESEN KINT LÉVŐ ORDER-ek half spread-je
+        bid_half = 0
+        ask_half = 0
+        if existing_bid and mid_price > 0:
+            bid_half = (mid_price - existing_bid['price']) / mid_price * 100
+        if existing_ask and mid_price > 0:
+            ask_half = (existing_ask['price'] - mid_price) / mid_price * 100
+        
         print(f"\r"
             f"📊 ${mid_price:,.{self.decimals}f} | "
-            f"{bid_status}B:${bid_price:,.{self.decimals}f} | "
-            f"{ask_status}A:${ask_price:,.{self.decimals}f} | "
+            f"{bid_status}B:${existing_bid['price'] if existing_bid else 0:,.{self.decimals}f}({bid_half:.2f}%) | "
+            f"{ask_status}A:${existing_ask['price'] if existing_ask else 0:,.{self.decimals}f}({ask_half:.2f}%) | "
             f"Spread:{current_spread*100:.2f}% | "
             f"PnL:${self.pnl_calculator.total_profit:.4f} | "
             f"💰 {self.quote_currency}:${current_quote:.0f}/{self.base_currency}:{current_base:.6f} | "
