@@ -8,7 +8,7 @@ trading:
   symbol: "PEPE/USD"
   
   # 🔥 SPREAD BEÁLLÍTÁSOK (mid price alapú)
-  base_half_spread: 0.0035      # 0.35% fél spread → teljes spread 0.7%
+  base_half_spread: 0.006      # 0.6% fél spread → teljes spread 1.2%
   min_half_spread: 0.00275      # 0.275% minimum (hogy a teljes spread >0.55%)
   max_half_spread: 0.01         # 1.0% maximum (védelem extrém esetben)
   
@@ -33,7 +33,7 @@ trading:
   # Volatilitás (opcionális, extra védelem)
   volatility:
     atr_period: 14
-    atr_extra_multiplier: 0     # 0 = kikapcsolva, később bekapcsolhatod
+    atr_extra_multiplier: 0.5  
 
 logging:
   level: "INFO"

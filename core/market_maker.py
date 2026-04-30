@@ -80,6 +80,9 @@ class MarketMaker:
         self.last_open_orders_check = 0
         self.cached_bid_order = None
         self.cached_ask_order = None
+
+        # Momentum skew boost (ideiglenes)
+        self.momentum_skew_boost = 0.0
         
         # MODULOK
         from core.position_manager import PositionManager
@@ -166,13 +169,6 @@ class MarketMaker:
     # ========== 🔥 BID/ASK SZÁMÍTÁS (MID PRICE ALAPJÁN) ==========
     
     def calculate_bid_ask(self):
-        """
-        Mid price alapú árazás (V1 stratégia, javított momentum védelemmel)
-
-        BID = mid * (1 - half_spread)
-        ASK = mid * (1 + half_spread)
-        """
-
         best_bid = self.api.get_best_bid(self.symbol)
         best_ask = self.api.get_best_ask(self.symbol)
         
@@ -181,40 +177,11 @@ class MarketMaker:
         
         mid_price = (best_bid + best_ask) / 2
         
-        # ========== 1. MOMENTUM VÉDELEM (JAVÍTOTT) ==========
-        bid_multiplier = 1.0
-        ask_multiplier = 1.0
+        # ========== 1. BASE SPREAD ==========
+        final_bid_half = self.base_half_spread
+        final_ask_half = self.base_half_spread
         
-        if self.last_filled_time:
-            time_since_fill = time.time() - self.last_filled_time
-            
-            if time_since_fill < self.cooldown_seconds:
-                progress = time_since_fill / self.cooldown_seconds
-                
-                if self.last_filled_side == 'sell':  # ASK teljesült (eladás, kevesebb PEPE)
-                    # BID közelebb (visszavétel), ASK távolabb (ne adj tovább)
-                    bid_multiplier = 0.5 + (0.5 * progress)   # 0.5 → 1.0
-                    ask_multiplier = 1.5 + (0.5 * progress)   # 1.5 → 2.0
-                    
-                    if progress < 0.1:
-                        print(f"  🔥 MOMENTUM: ASK után | bid_mult={bid_multiplier:.2f}, ask_mult={ask_multiplier:.2f}")
-                        
-                elif self.last_filled_side == 'buy':  # BID teljesült (vétel, több PEPE)
-                    # ASK közelebb (eladás), BID távolabb (ne vegyél többet)
-                    ask_multiplier = 0.5 + (0.5 * progress)   # 0.5 → 1.0
-                    bid_multiplier = 1.5 + (0.5 * progress)   # 1.5 → 2.0
-                    
-                    if progress < 0.1:
-                        print(f"  🔥 MOMENTUM: BID után | ask_mult={ask_multiplier:.2f}, bid_mult={bid_multiplier:.2f}")
-        
-        # ========== 2. BASE SPREAD ==========
-        base_half_spread = self.base_half_spread
-        
-        # Momentum alkalmazása
-        final_bid_half = base_half_spread * bid_multiplier
-        final_ask_half = base_half_spread * ask_multiplier
-        
-        # ========== 3. SKEW (inventory alapján) ==========
+        # ========== 2. SKEW (inventory alapján) ==========
         balances = self.position_manager.get_current_balances()
         current_base = balances.get(self.base_currency, 0)
         current_quote = balances.get(self.quote_currency, 0)
@@ -226,36 +193,45 @@ class MarketMaker:
         else:
             deviation = 0
         
-        # 🔥 SKEW: ha eltérés van, az egyik oldalt távolabb, a másikat közelebb
-        max_skew = 0.001  # maximum 0.1% eltolás
-        
+        max_skew = 0.008
         if abs(deviation) >= 0.5:
             skew_strength = max_skew
         else:
             skew_strength = max_skew * (abs(deviation) / 0.5)
         
-        # 🔥 JAVÍTÁS: skew iránya (mindig a trend ellen)
-        if deviation > 0:  # Több PEPE → ELADÁS
-            final_bid_half = final_bid_half + skew_strength  # BID távolabb
-            final_ask_half = final_ask_half - skew_strength  # ASK közelebb
-        else:  # Kevés PEPE → VÉTEL
-            final_bid_half = final_bid_half - skew_strength  # BID közelebb
-            final_ask_half = final_ask_half + skew_strength  # ASK távolabb
+        # ========== 3. MOMENTUM SKEW BOOST ==========
+        if self.last_filled_time:
+            time_since_fill = time.time() - self.last_filled_time
+            if time_since_fill < self.cooldown_seconds:
+                progress = time_since_fill / self.cooldown_seconds
+                current_boost = self.momentum_skew_boost * (1 - progress)
+            else:
+                current_boost = 0.0
+                self.momentum_skew_boost = 0.0
+        else:
+            current_boost = 0.0
         
-        # ========== 4. MINIMUM SPREAD BIZTOSÍTÁS ==========
-        min_required = self.maker_fee * 1.1  # 0.275%
+        # Skew alkalmazása boost-tal
+        if deviation > 0:
+            final_bid_half = final_bid_half + skew_strength + current_boost
+            final_ask_half = final_ask_half - skew_strength - current_boost
+        else:
+            final_bid_half = final_bid_half - skew_strength - current_boost
+            final_ask_half = final_ask_half + skew_strength + current_boost
+        
+        # ========== 4. MINIMUM SPREAD ==========
+        min_required = self.maker_fee * 1.1
         final_bid_half = max(min_required, min(self.max_half_spread, final_bid_half))
         final_ask_half = max(min_required, min(self.max_half_spread, final_ask_half))
         
-        # ========== 5. ÁRAK SZÁMÍTÁSA (mid alapján) ==========
-        raw_bid = mid_price * (1 - final_bid_half)
-        raw_ask = mid_price * (1 + final_ask_half)
+        # ========== 5. ÁRAK (best bid/ask alapján) ==========
+        raw_bid = best_bid * (1 - final_bid_half)
+        raw_ask = best_ask * (1 + final_ask_half)
         
-        # ========== 6. TICK SIZE KEREKÍTÉS ==========
+        # Tick size kerekítés
         bid_price = round(math.floor(raw_bid / self.tick_size) * self.tick_size, self.decimals)
         ask_price = round(math.ceil(raw_ask / self.tick_size) * self.tick_size, self.decimals)
         
-        # Érvényesség ellenőrzés
         if bid_price >= ask_price:
             bid_price = round(bid_price - self.tick_size, self.decimals)
             ask_price = round(ask_price + self.tick_size, self.decimals)
@@ -385,6 +361,7 @@ class MarketMaker:
                     result = self.pnl_calculator.add_sell(amount, price, fee, trade_ids)
                     self._print_sell_result(result)
                     self.pnl_calculator.log_trade('SELL', amount, price, fee, trade_ids, result['profit'])
+                    self.momentum_skew_boost = 0.01  # 1% skew boost
 
                     # 🔥 AZONNALI BALANCE FRISSÍTÉS (eladás után)
                     self.position_manager.update_balances_direct(
@@ -404,6 +381,7 @@ class MarketMaker:
                     result = self.pnl_calculator.add_buy(amount, price, fee, trade_ids)
                     self._print_buy_result(result)
                     self.pnl_calculator.log_trade('BUY', amount, price, fee, trade_ids)
+                    self.momentum_skew_boost = -0.01  # -1% skew boost
 
                     # 🔥 AZONNALI BALANCE FRISSÍTÉS (vásárlás után)
                     self.position_manager.update_balances_direct(
@@ -463,8 +441,12 @@ class MarketMaker:
             # Meglévő order-ek lekérése
             existing_bid, existing_ask = self.get_open_orders_from_api()
             
-            # Refresh threshold
-            refresh_threshold = self.base_half_spread
+            # Dinamikus refresh threshold az ATR alapján
+            if self.atr_extra_multiplier > 0 and len(self.price_history) > self.atr_period:
+                atr = self._calculate_volatility_extra(mid_price)
+                refresh_threshold = max(0.0015, min(0.003, atr * 2))
+            else:
+                refresh_threshold = 0.002  # 0.2% alapból
             
             needs_bid = False
             needs_ask = False
@@ -608,7 +590,7 @@ class MarketMaker:
         self.is_running = True
         
         print("\n" + "="*60)
-        print("🚀 KRAKEN MARKET MAKER BOT V2 INDÍTVA")
+        print("🚀 KRAKEN MARKET MAKER BOT INDÍTVA")
         print(f"📊 Üzemmód: Mid price alapú, aszimmetrikus momentum védelemmel")
         print(f"🎯 Alap spread: {self.base_half_spread*2*100:.2f}%")
         print(f"🛡️ Momentum védelem: {self.cooldown_seconds}s, ASK x{self.ask_multiplier}, BID x{self.bid_multiplier}")
