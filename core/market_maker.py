@@ -1,7 +1,7 @@
 # core/market_maker.py
 
 """
-Market Maker V2
+Market Maker V3
 """
 
 import time
@@ -26,7 +26,6 @@ class MarketMaker:
         self.cooldown_seconds = momentum_config.get('cooldown_seconds', 5)
         self.ask_multiplier = momentum_config.get('ask_multiplier', 2.5)
         self.bid_multiplier = momentum_config.get('bid_multiplier', 2.5)
-        self.min_distance_percent = momentum_config.get('min_distance_percent', 0.002)
         
         # 🔥 REBALANCE
         self.target_ratio_base = trading_config.get('target_ratio_base', 0.5)
@@ -63,9 +62,9 @@ class MarketMaker:
         self.last_filled_side = None
         self.last_filled_time = 0
         
-        # Napi limit
-        self.daily_loss_limit = -5.0
-        self.daily_start_profit = 0.0
+        # Napi veszteség
+        self.daily_loss_percent = trading_config.get('daily_loss_percent', 3.0)  # 3% alapból
+        self.daily_start_portfolio_value = 0.0
         self.daily_start_time = time.time()
         
         # Tick size
@@ -80,9 +79,6 @@ class MarketMaker:
         self.last_open_orders_check = 0
         self.cached_bid_order = None
         self.cached_ask_order = None
-
-        # Momentum skew boost (ideiglenes)
-        self.momentum_skew_boost = 0.0
         
         # MODULOK
         from core.position_manager import PositionManager
@@ -127,6 +123,13 @@ class MarketMaker:
         else:
             return 9
     
+    def get_current_portfolio_value(self, mid_price):
+        """Aktuális portfólió érték kiszámítása"""
+        balances = self.position_manager.get_current_balances()
+        current_base = balances.get(self.base_currency, 0)
+        current_quote = balances.get(self.quote_currency, 0)
+        return current_quote + (current_base * mid_price)
+
     def _get_min_order_size(self):
         try:
             markets = self.api.exchange.load_markets()
@@ -181,7 +184,33 @@ class MarketMaker:
         final_bid_half = self.base_half_spread
         final_ask_half = self.base_half_spread
         
-        # ========== 2. SKEW (inventory alapján) ==========
+        # ========== 2. 🔥 MOMENTUM VÉDELEM (ideiglenes, cooldown alatt) ==========
+        momentum_bid_mult = 1.0
+        momentum_ask_mult = 1.0
+        
+        if self.last_filled_time:
+            time_since_fill = time.time() - self.last_filled_time
+            if time_since_fill < self.cooldown_seconds:
+                # Lineáris csökkenés: a cooldown végére 1x-es lesz
+                progress = 1 - (time_since_fill / self.cooldown_seconds)
+                
+                if self.last_filled_side == 'sell':  # ASK teljesült
+                    # ASK spread NÖVEXIK (ne adjunk el még egyet)
+                    momentum_ask_mult = 1 + (self.ask_multiplier - 1) * progress
+                    # BID spread CSÖKKEN kicsit (hogy vonzóbb legyen a vétel - de ez opcionális)
+                    momentum_bid_mult = 1 - (self.bid_multiplier - 1) * progress * 0.3
+                    momentum_bid_mult = max(0.7, momentum_bid_mult)
+                else:  # BID teljesült
+                    # BID spread NÖVEXIK (ne vegyünk még egyet)
+                    momentum_bid_mult = 1 + (self.bid_multiplier - 1) * progress
+                    # ASK spread CSÖKKEN kicsit
+                    momentum_ask_mult = 1 - (self.ask_multiplier - 1) * progress * 0.3
+                    momentum_ask_mult = max(0.7, momentum_ask_mult)
+                
+                final_bid_half *= momentum_bid_mult
+                final_ask_half *= momentum_ask_mult
+        
+        # ========== 3. ⚖️ REBALANCING (inventory skew, folyamatos) ==========
         balances = self.position_manager.get_current_balances()
         current_base = balances.get(self.base_currency, 0)
         current_quote = balances.get(self.quote_currency, 0)
@@ -189,42 +218,31 @@ class MarketMaker:
         
         if total_value > 0:
             base_ratio = (current_base * mid_price) / total_value
-            deviation = base_ratio - self.target_ratio_base
+            deviation = base_ratio - self.target_ratio_base  # cél: 0.5
         else:
             deviation = 0
         
-        max_skew = 0.008
-        if abs(deviation) >= 0.5:
-            skew_strength = max_skew
-        else:
-            skew_strength = max_skew * (abs(deviation) / 0.5)
+        # 🔥 HASZNÁLD A CONFIG-BÓL A MAX_SKEW-T!
+        max_skew = self.max_skew  # alapból 0.001 a config-ban, de érdemes nagyobbra venni
+        # JAVASLAT: max_skew = 0.005  # 0.5%
         
-        # ========== 3. MOMENTUM SKEW BOOST ==========
-        if self.last_filled_time:
-            time_since_fill = time.time() - self.last_filled_time
-            if time_since_fill < self.cooldown_seconds:
-                progress = time_since_fill / self.cooldown_seconds
-                current_boost = self.momentum_skew_boost * (1 - progress)
-            else:
-                current_boost = 0.0
-                self.momentum_skew_boost = 0.0
-        else:
-            current_boost = 0.0
+        # Skew erőssége - a deviáció arányában (max 50% eltérésnél éri el a max_skew-t)
+        skew_strength = max_skew * min(1.0, abs(deviation) / 0.5)
         
-        # Skew alkalmazása boost-tal
-        if deviation > 0:
-            final_bid_half = final_bid_half + skew_strength + current_boost
-            final_ask_half = final_ask_half - skew_strength - current_boost
-        else:
-            final_bid_half = final_bid_half - skew_strength - current_boost
-            final_ask_half = final_ask_half + skew_strength + current_boost
+        # Skew alkalmazása (additív módon, mivel ez a half spread-re megy)
+        if deviation > 0:  # Túl sok PEPE -> eladás felé kell tolni
+            final_bid_half += skew_strength   # BID spread NÖVEXIK (olcsóbban veszünk)
+            final_ask_half -= skew_strength   # ASK spread CSÖKKEN (olcsóbban adunk el)
+        else:  # Túl kevés PEPE -> vétel felé kell tolni
+            final_bid_half -= skew_strength   # BID spread CSÖKKEN (drágábban veszünk)
+            final_ask_half += skew_strength   # ASK spread NÖVEXIK (drágábban adunk el)
         
         # ========== 4. MINIMUM SPREAD ==========
-        min_required = self.maker_fee * 1.1
+        min_required = self.maker_fee * 1.1  # 0.275%
         final_bid_half = max(min_required, min(self.max_half_spread, final_bid_half))
         final_ask_half = max(min_required, min(self.max_half_spread, final_ask_half))
         
-        # ========== 5. ÁRAK (best bid/ask alapján) ==========
+        # ========== 5. ÁRAK ==========
         raw_bid = best_bid * (1 - final_bid_half)
         raw_ask = best_ask * (1 + final_ask_half)
         
@@ -252,11 +270,15 @@ class MarketMaker:
         if len(self.price_history) < self.atr_period + 1:
             return 0
         
+        # 🔥 JAVÍTOTT VERZIÓ - csak mid price alapján
         tr_values = []
         for i in range(1, len(self.price_history)):
-            high = max(self.price_history[i], self.price_history[i-1])
-            low = min(self.price_history[i], self.price_history[i-1])
-            tr_values.append(high - low)
+            current = self.price_history[i]
+            previous = self.price_history[i-1]
+            
+            # Mivel nincs high/low adatunk, a true range = |current - previous|
+            true_range = abs(current - previous)
+            tr_values.append(true_range)
         
         if len(tr_values) < self.atr_period:
             return 0
@@ -361,13 +383,6 @@ class MarketMaker:
                     result = self.pnl_calculator.add_sell(amount, price, fee, trade_ids)
                     self._print_sell_result(result)
                     self.pnl_calculator.log_trade('SELL', amount, price, fee, trade_ids, result['profit'])
-                    self.momentum_skew_boost = 0.01  # 1% skew boost
-
-                    # 🔥 AZONNALI BALANCE FRISSÍTÉS (eladás után)
-                    self.position_manager.update_balances_direct(
-                        self.pnl_calculator.pepe_balance,
-                        self.pnl_calculator.usd_balance
-                    )
                     
                     if self.notifier:
                         self.notifier.send_message(
@@ -381,13 +396,6 @@ class MarketMaker:
                     result = self.pnl_calculator.add_buy(amount, price, fee, trade_ids)
                     self._print_buy_result(result)
                     self.pnl_calculator.log_trade('BUY', amount, price, fee, trade_ids)
-                    self.momentum_skew_boost = -0.01  # -1% skew boost
-
-                    # 🔥 AZONNALI BALANCE FRISSÍTÉS (vásárlás után)
-                    self.position_manager.update_balances_direct(
-                        self.pnl_calculator.pepe_balance,
-                        self.pnl_calculator.usd_balance
-                    )
                     
                     if self.notifier:
                         self.notifier.send_message(
@@ -513,17 +521,30 @@ class MarketMaker:
                         f"🎯 Cél {self.base_currency}: {target_base:.6f} (most: {current_base:.6f})"
                     )
             
-            # Napi veszteség ellenőrzés
-            if time.time() - self.daily_start_time > 86400:
-                self.daily_start_time = time.time()
-                self.daily_start_profit = self.pnl_calculator.total_profit
-            
-            daily_pnl = self.pnl_calculator.total_profit - self.daily_start_profit
-            if daily_pnl < self.daily_loss_limit:
-                print(f"\n🔴 NAPI VESZTESÉGI HATÁR ELÉRVE! PnL: ${daily_pnl:.2f}")
-                if self.notifier:
-                    self.notifier.send_message(f"🔴 NAPI VESZTESÉGI HATÁR! A bot leáll. PnL: ${daily_pnl:.2f}")
-                self.stop()
+            # ========== NAPI DRAWDOWN ELLENŐRZÉS (százalék alapú) ==========
+            current_time = time.time()
+
+            # Új nap? (24 óra eltelt)
+            if current_time - self.daily_start_time > 86400:
+                self.daily_start_time = current_time
+                self.daily_start_portfolio_value = self.get_current_portfolio_value(mid_price)
+                print(f"\n📅 Új nap - induló portfólió érték: ${self.daily_start_portfolio_value:.2f}")
+
+            # Százalékos drawdown számítás
+            if self.daily_start_portfolio_value > 0:
+                current_value = self.get_current_portfolio_value(mid_price)
+                daily_return_pct = ((current_value - self.daily_start_portfolio_value) / self.daily_start_portfolio_value) * 100
+                
+                if daily_return_pct <= -self.daily_loss_percent:
+                    print(f"\n🔴 NAPI DRAWDOWN HATÁR ELÉRVE! {daily_return_pct:.2f}% (limit: -{self.daily_loss_percent}%)")
+                    if self.notifier:
+                        self.notifier.send_message(
+                            f"🔴 NAPI DRAWDOWN HATÁR!\n"
+                            f"📉 Hozam: {daily_return_pct:.2f}%\n"
+                            f"💰 Portfólió: ${self.daily_start_portfolio_value:.2f} → ${current_value:.2f}\n"
+                            f"🛑 A bot leáll."
+                        )
+                    self.stop()
             
         except Exception as e:
             print(f"⚠️ Hiba az ensure_orders-ben: {e}")
@@ -660,14 +681,14 @@ class MarketMaker:
         if self.notifier:
             if stats['ask_filled'] > 0:
                 message = (
-                    f"🛑 BOT LEÁLLÍTVA V2\n─────────────────\n"
+                    f"🛑 BOT LEÁLLÍTVA V3\n─────────────────\n"
                     f"💰 FIFO profit: ${stats['total_profit']:.4f}\n"
                     f"📊 ASK teljesülések: {stats['ask_filled']}\n"
                     f"📈 BID teljesülések: {stats['bid_filled']}\n"
                     f"⏱️ Futási idő: {runtime // 3600}h {(runtime % 3600) // 60}m {runtime % 60}s"
                 )
             else:
-                message = f"🛑 BOT LEÁLLÍTVA V2\n─────────────────\n⚠️ Nincs ASK teljesülés"
+                message = f"🛑 BOT LEÁLLÍTVA V3\n─────────────────\n⚠️ Nincs ASK teljesülés"
             self.notifier.send_message(message)
         
         print("✅ Bot leállítva")

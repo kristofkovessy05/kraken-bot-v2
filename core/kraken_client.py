@@ -1,7 +1,7 @@
 # core/kraken_client.py
 
 """
-Kraken API Client V2 - Last Bid/Ask alapú kereskedéshez
+Kraken API Client V3 
 """
 
 import ccxt
@@ -26,7 +26,7 @@ class KrakenClient:
             print("⚠️ Sandbox mód - valódi kereskedés NINCS")
     
     def _safe(self, func, *args, **kwargs):
-        time.sleep(0.003)
+        time.sleep(0.05)  # 50ms -> 20 req/sec
         return func(*args, **kwargs)
     
     def get_order_book(self, symbol=None):

@@ -14,10 +14,6 @@ class PnLCalculator:
         self.total_profit = 0.0
         self.bid_filled = 0
         self.ask_filled = 0
-        
-        # 🔥 ÚJ: balance nyomon követés
-        self.pepe_balance = 0.0
-        self.usd_balance = 0.0
     
     def init_inventory(self, initial_base, current_price):
         """Kezdeti inventory beállítása (meglévő pozíció)"""
@@ -29,9 +25,6 @@ class PnLCalculator:
                 'fee': 0,
                 'cost': initial_cost
             }]
-            # 🔥 BALANCE FRISSÍTÉS
-            self.pepe_balance = initial_base
-            self.usd_balance = 0.0  # Kezdetben nincs USD befektetve (vagy a kezdeti egyenleg?)
             print(f"  🔍 Kezdeti inventory: {initial_base} {self.base_currency} @ ${current_price:.9f}")
     
     def add_buy(self, amount, price, fee, trade_ids):
@@ -44,10 +37,6 @@ class PnLCalculator:
             'fee': fee,
             'cost': cost
         })
-        
-        # 🔥 BALANCE FRISSÍTÉS (vásárlás: USD csökken, PEPE nő)
-        self.usd_balance -= cost
-        self.pepe_balance += amount
         
         return {
             'side': 'BUY',
@@ -81,11 +70,6 @@ class PnLCalculator:
             remaining -= sell_amount
         
         self.total_profit += trade_profit
-        
-        # 🔥 BALANCE FRISSÍTÉS (eladás: USD nő, PEPE csökken)
-        revenue = amount * price - fee
-        self.usd_balance += revenue
-        self.pepe_balance -= amount
         
         return {
             'side': 'SELL',

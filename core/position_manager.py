@@ -13,11 +13,6 @@ class PositionManager:
         trading_config = config['trading']
         self.target_ratio_base = trading_config.get('target_ratio_base', 0.5)
         self.target_ratio_quote = trading_config.get('target_ratio_quote', 0.5)
-        self.rebalance_threshold_percent = trading_config.get('rebalance_threshold_percent', 0.3)
-        self.rebalance_multiplier_max = trading_config.get('rebalance_multiplier_max', 2.0)
-        
-        self.threshold_low = 1 - self.rebalance_threshold_percent
-        self.threshold_high = 1 + self.rebalance_threshold_percent
         
         # Állapot
         self.last_known_balances = {base_currency: 0.0, quote_currency: 0.0}
@@ -35,16 +30,9 @@ class PositionManager:
             self.base_currency: self.last_known_balances.get(self.base_currency, 0),
             self.quote_currency: self.last_known_balances.get(self.quote_currency, 0)
         }
-    
-    def update_balances_direct(self, base_balance, quote_balance):
-        """Közvetlen balance frissítés trade után"""
-        self.last_known_balances = {
-            self.quote_currency: quote_balance,
-            self.base_currency: base_balance
-        }
 
     def check_inventory_limits(self, side, mid_price, base_order_size):
-        """Kemény inventory limit (V3)"""
+        """Kemény inventory limit"""
         current_base = self.last_known_balances.get(self.base_currency, 0)
         current_quote = self.last_known_balances.get(self.quote_currency, 0)
         total_value = current_quote + (current_base * mid_price) if mid_price > 0 else 0

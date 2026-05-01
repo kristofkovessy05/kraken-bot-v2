@@ -2,7 +2,7 @@
 
 #!/usr/bin/env python3
 """
-Market Maker Bot V2 - Last Bid/Ask alapú kereskedés
+Market Maker Bot V3 - Last Bid/Ask alapú kereskedés
 """
 
 import os
@@ -52,7 +52,7 @@ def load_config():
     return config
 
 def main():
-    print("🚀 MARKET MAKER BOT V2 INDÍTÁSA")
+    print("🚀 MARKET MAKER BOT V3 INDÍTÁSA")
     print("📊 Last Bid/Ask alapú kereskedés")
     print("=" * 60)
     
@@ -64,12 +64,13 @@ def main():
     
     # Telegram notifier (opcionális)
     notifier = None
-    if config['telegram']['token'] and config['telegram']['chat_id']:
+    telegram_config = config.get('telegram', {})
+    if telegram_config.get('token') and telegram_config.get('chat_id'):
         notifier = TelegramNotifier(
-            token=config['telegram']['token'],
-            chat_id=config['telegram']['chat_id']
+            token=telegram_config['token'],
+            chat_id=telegram_config['chat_id']
         )
-        notifier.send_message("🤖 MARKET MAKER BOT V2 INDÍTVA\n📊 Last Bid/Ask alapú kereskedés")
+        notifier.send_message("🤖 MARKET MAKER BOT V3 INDÍTVA\n📊 Last Bid/Ask alapú kereskedés")
     
     # Kraken client
     api = KrakenClient(
