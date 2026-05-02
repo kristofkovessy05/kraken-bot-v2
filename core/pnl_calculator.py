@@ -15,6 +15,43 @@ class PnLCalculator:
         self.bid_filled = 0
         self.ask_filled = 0
     
+    def _log_initial_inventory(self, amount, price):
+        """Kezdeti inventory naplózása CSV-be"""
+        try:
+            import csv
+            from pathlib import Path
+            from datetime import datetime
+            
+            project_root = Path(__file__).parent.parent
+            log_dir = project_root / "logs"
+            log_dir.mkdir(exist_ok=True)
+            
+            csv_file = log_dir / "trades.csv"
+            file_exists = csv_file.exists()
+            
+            trade_data = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'side': 'INITIAL_INVENTORY',
+                'amount': amount,
+                'price': price,
+                'fee': 0,
+                'fee_currency': self.quote_currency,
+                'trade_ids': 'INITIAL',
+                'realized_profit': '',  # Üres, mert nem realizált
+                'total_profit': self.total_profit
+            }
+            
+            with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=trade_data.keys())
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(trade_data)
+            
+            print(f"  📝 Kezdeti inventory naplózva: {amount} {self.base_currency} @ ${price}")
+            
+        except Exception as e:
+            print(f"  ⚠️ Inventory naplózási hiba: {e}")
+
     def init_inventory(self, initial_base, current_price):
         """Kezdeti inventory beállítása (meglévő pozíció)"""
         if initial_base > 0 and current_price > 0:
@@ -26,6 +63,8 @@ class PnLCalculator:
                 'cost': initial_cost
             }]
             print(f"  🔍 Kezdeti inventory: {initial_base} {self.base_currency} @ ${current_price:.9f}")
+
+            self._log_initial_inventory(initial_base, current_price)
     
     def add_buy(self, amount, price, fee, trade_ids):
         """BID teljesülés - hozzáadás a FIFO készlethez"""

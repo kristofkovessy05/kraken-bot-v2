@@ -5,7 +5,7 @@
 sandbox: false
 
 trading:
-  symbol: "PEPE/USD"
+  symbol: "TAO/USD"
   
   # 🔥 SPREAD BEÁLLÍTÁSOK (mid price alapú)
   base_half_spread: 0.006      # 0.6% fél spread → teljes spread 1.2%

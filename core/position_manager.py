@@ -48,11 +48,11 @@ class PositionManager:
         
         if side == 'buy':  # vétel
             if current_ratio > MAX_BASE_RATIO:
-                print(f"  🛑 TILTÁS: Túl sok PEPE ({current_ratio*100:.1f}% > 70%), vétel letiltva")
+                print(f"  🛑 TILTÁS: Túl sok {self.base_currency} ({current_ratio*100:.1f}% > 70%), vétel letiltva")
                 return False, 0
         else:  # eladás
             if current_ratio < MIN_BASE_RATIO:
-                print(f"  🛑 TILTÁS: Túl kevés PEPE ({current_ratio*100:.1f}% < 30%), eladás letiltva")
+                print(f"  🛑 TILTÁS: Túl kevés {self.base_currency} ({current_ratio*100:.1f}% < 30%), eladás letiltva")
                 return False, 0
         
         # Méret módosítás (ha az arány közelít a limithez)

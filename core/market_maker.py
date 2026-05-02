@@ -108,6 +108,7 @@ class MarketMaker:
             'DOT/USD': 0.0001,
             'LINK/USD': 0.00001,
             'PEPE/USD': 0.000000001,
+            'TAO/USD': 0.0001, 
         }
         return tick_sizes.get(self.symbol, 0.01)
     
