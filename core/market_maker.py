@@ -66,6 +66,10 @@ class MarketMaker:
         self.daily_loss_percent = trading_config.get('daily_loss_percent', 3.0)  # 3% alapból
         self.daily_start_portfolio_value = 0.0
         self.daily_start_time = time.time()
+
+        # Napi veszteség utáni szünet
+        self.is_paused = False
+        self.pause_until = 0
         
         # Tick size
         self.tick_size = self._get_tick_size()
@@ -522,7 +526,7 @@ class MarketMaker:
                         f"🎯 Cél {self.base_currency}: {target_base:.6f} (most: {current_base:.6f})"
                     )
             
-            # ========== NAPI DRAWDOWN ELLENŐRZÉS (százalék alapú) ==========
+            # ========== NAPI DRAWDOWN ELLENŐRZÉS ==========
             current_time = time.time()
 
             # Új nap? (24 óra eltelt)
@@ -530,6 +534,16 @@ class MarketMaker:
                 self.daily_start_time = current_time
                 self.daily_start_portfolio_value = self.get_current_portfolio_value(mid_price)
                 print(f"\n📅 Új nap - induló portfólió érték: ${self.daily_start_portfolio_value:.2f}")
+                # 🔥 HA SZÜNETELT, FOLYTASSUK
+                if self.is_paused:
+                    print(f"🟢 Bot újraindulva a napi limit után!")
+                    self.is_paused = False
+                    if self.notifier:
+                        self.notifier.send_message(f"🟢 Bot újraindult a napi limit letelte után.\n💰 Portfólió: ${self.daily_start_portfolio_value:.2f}")
+
+            # Ha szünetel, ne csináljunk semmit
+            if self.is_paused:
+                return
 
             # Százalékos drawdown számítás
             if self.daily_start_portfolio_value > 0:
@@ -538,14 +552,27 @@ class MarketMaker:
                 
                 if daily_return_pct <= -self.daily_loss_percent:
                     print(f"\n🔴 NAPI DRAWDOWN HATÁR ELÉRVE! {daily_return_pct:.2f}% (limit: -{self.daily_loss_percent}%)")
+                    self.is_paused = True
+                    self.pause_until = time.time() + 86400  # 24 óra múlva
                     if self.notifier:
                         self.notifier.send_message(
                             f"🔴 NAPI DRAWDOWN HATÁR!\n"
                             f"📉 Hozam: {daily_return_pct:.2f}%\n"
                             f"💰 Portfólió: ${self.daily_start_portfolio_value:.2f} → ${current_value:.2f}\n"
-                            f"🛑 A bot leáll."
+                            f"⏸️ Bot szünetel 24 óráig.\n🟢 Holnap automatikusan újraindul."
                         )
-                    self.stop()
+                    # Szünetelés a nap hátralévő részében
+                    while self.is_paused and time.time() < self.pause_until:
+                        time.sleep(60)  # Ellenőrizzük percenként
+                        # Ellenőrizzük, hogy eljött-e az új nap
+                        if time.time() >= self.pause_until:
+                            print(f"\n📅 Új nap - bot újraindul...")
+                            self.daily_start_time = time.time()
+                            self.daily_start_portfolio_value = self.get_current_portfolio_value(mid_price)
+                            self.is_paused = False
+                            if self.notifier:
+                                self.notifier.send_message(f"🟢 Bot újraindult.\n💰 Portfólió: ${self.daily_start_portfolio_value:.2f}")
+                            break
             
         except Exception as e:
             print(f"⚠️ Hiba az ensure_orders-ben: {e}")
